@@ -90,7 +90,7 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
     {
         while (true)
         {
-            Console.Clear();
+            ClearScreen();
             var interfaces = networkService.GetInterfaces();
             Console.WriteLine("Network interfaces");
             Console.WriteLine();
@@ -133,7 +133,7 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
     {
         while (true)
         {
-            Console.Clear();
+            ClearScreen();
             var detail = networkService.GetInterfaceDetail(name);
             if (detail is null)
             {
@@ -298,6 +298,22 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
     {
         Console.WriteLine(message);
         Console.ReadKey(intercept: true);
+    }
+
+    private static void ClearScreen()
+    {
+        if (Console.IsOutputRedirected)
+        {
+            return;
+        }
+
+        try
+        {
+            Console.Clear();
+        }
+        catch (IOException)
+        {
+        }
     }
 }
 
@@ -478,15 +494,15 @@ internal sealed class CommandRunner
                 return new CommandResult(1, string.Empty, $"Unable to start {fileName}.");
             }
 
-            var output = process.StandardOutput.ReadToEnd();
-            var error = process.StandardError.ReadToEnd();
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
             if (!process.WaitForExit(3000))
             {
                 process.Kill(entireProcessTree: true);
-                return new CommandResult(124, output, $"Timed out running {fileName}.");
+                return new CommandResult(124, string.Empty, $"Timed out running {fileName}.");
             }
 
-            return new CommandResult(process.ExitCode, output, error);
+            return new CommandResult(process.ExitCode, outputTask.GetAwaiter().GetResult(), errorTask.GetAwaiter().GetResult());
         }
         catch (Exception ex) when (ex is FileNotFoundException or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
