@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using Spectre.Console;
 
 namespace YANM_Linux;
 
@@ -31,11 +33,11 @@ internal static class Program
     private static int PrintHelp()
     {
         Console.WriteLine("Usage:");
-        Console.WriteLine("  netutil                 Start interactive UI");
-        Console.WriteLine("  netutil --help          Print help");
-        Console.WriteLine("  netutil --no-ui         Print help and exit");
-        Console.WriteLine("  netutil list            Print interface list");
-        Console.WriteLine("  netutil show <iface>    Print interface detail");
+        Console.WriteLine("  yanm                    Start interactive UI");
+        Console.WriteLine("  yanm --help             Print help");
+        Console.WriteLine("  yanm --no-ui            Print help and exit");
+        Console.WriteLine("  yanm list               Print interface list");
+        Console.WriteLine("  yanm show <iface>       Print interface detail");
         return 0;
     }
 
@@ -50,7 +52,7 @@ internal static class Program
     {
         foreach (var iface in networkService.GetInterfaces())
         {
-            Console.WriteLine($"{iface.Name}\tstate={iface.OperState}\tcarrier={iface.Carrier}\tipv4={iface.IPv4Address}\tspeed={iface.Speed}\tmanager={iface.Manager}");
+            Console.WriteLine($"{iface.Name}\tstate={iface.OperState}\thardware={iface.HardwareName}\tcarrier={iface.Carrier}\tipv4={iface.IPv4Address}\tipv6={iface.IPv6Address}\tspeed={iface.Speed}\tmanager={iface.Manager}");
         }
 
         return 0;
@@ -66,6 +68,7 @@ internal static class Program
         }
 
         Console.WriteLine($"Name: {detail.Name}");
+        Console.WriteLine($"State: {detail.OperState}");
         Console.WriteLine($"MAC address: {detail.MacAddress}");
         Console.WriteLine($"MTU: {detail.Mtu}");
         Console.WriteLine($"IPv4 addresses: {FormatList(detail.IPv4Addresses)}");
@@ -88,31 +91,86 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
 {
     public void Run()
     {
+        if (Console.IsInputRedirected || Console.IsOutputRedirected)
+        {
+            RunPlain();
+            return;
+        }
+
+        RunSpectre();
+    }
+
+    private void RunSpectre()
+    {
+        var selectedIndex = 0;
+
         while (true)
         {
-            ClearScreen();
             var interfaces = networkService.GetInterfaces();
-            Console.WriteLine("Network interfaces");
-            Console.WriteLine();
+            if (selectedIndex >= interfaces.Count)
+            {
+                selectedIndex = Math.Max(0, interfaces.Count - 1);
+            }
+
+            AnsiConsole.Clear();
+            AnsiConsole.Write(new Rule("[bold]Network interfaces[/]").RuleStyle("grey"));
 
             if (interfaces.Count == 0)
             {
-                Console.WriteLine("No network interfaces detected.");
-                ReadKey("Press any key to quit.");
+                AnsiConsole.MarkupLine("[yellow]No network interfaces detected.[/]");
+                AnsiConsole.Prompt(new TextPrompt<string>("Press [bold]Enter[/] to quit.").AllowEmpty());
                 return;
             }
 
-            for (var i = 0; i < interfaces.Count; i++)
+            RenderInterfaceTable(interfaces, selectedIndex);
+            AnsiConsole.MarkupLine("[grey]Up/Down move, Enter opens, R refreshes, Q quits[/]");
+
+            var key = Console.ReadKey(intercept: true);
+
+            if (key.Key == ConsoleKey.Q)
             {
-                var iface = interfaces[i];
-                Console.WriteLine($"{i + 1}. {iface.Name}  state={iface.OperState}  carrier={iface.Carrier}  ipv4={iface.IPv4Address}  speed={iface.Speed}  manager={iface.Manager}");
+                return;
             }
 
-            Console.WriteLine();
+            if (key.Key == ConsoleKey.R)
+            {
+                continue;
+            }
+
+            if (key.Key == ConsoleKey.UpArrow)
+            {
+                selectedIndex = selectedIndex <= 0 ? interfaces.Count - 1 : selectedIndex - 1;
+                continue;
+            }
+
+            if (key.Key == ConsoleKey.DownArrow)
+            {
+                selectedIndex = selectedIndex >= interfaces.Count - 1 ? 0 : selectedIndex + 1;
+                continue;
+            }
+
+            if (key.Key == ConsoleKey.Enter)
+            {
+                ShowInterface(interfaces[selectedIndex].Name);
+            }
+        }
+    }
+
+    private void RunPlain()
+    {
+        while (true)
+        {
+            var interfaces = networkService.GetInterfaces();
+            PrintPlainInterfaceList(interfaces);
+
+            if (interfaces.Count == 0)
+            {
+                return;
+            }
+
             Console.Write("Select interface number, R to refresh, or Q to quit: ");
             var input = Console.ReadLine()?.Trim();
-
-            if (string.Equals(input, "q", StringComparison.OrdinalIgnoreCase))
+            if (input is null || string.Equals(input, "q", StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
@@ -122,75 +180,177 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
                 continue;
             }
 
-            if (int.TryParse(input, out var selected) && selected >= 1 && selected <= interfaces.Count)
+            if (TrySelectNumber(input, interfaces.Count, out var selectedIndex))
             {
-                ShowInterface(interfaces[selected - 1].Name);
+                ShowInterface(interfaces[selectedIndex].Name);
             }
         }
+    }
+
+    private static void RenderInterfaceTable(IReadOnlyList<InterfaceSummary> interfaces, int selectedIndex)
+    {
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .Expand()
+            .AddColumn("#")
+            .AddColumn("Name")
+            .AddColumn("State")
+            .AddColumn("Hardware")
+            .AddColumn("Carrier")
+            .AddColumn("IPv4")
+            .AddColumn("Speed")
+            .AddColumn("Manager");
+
+        for (var i = 0; i < interfaces.Count; i++)
+        {
+            var iface = interfaces[i];
+            var selected = i == selectedIndex;
+            table.AddRow(
+                FormatTableCell((i + 1).ToString(CultureInfo.InvariantCulture), selected),
+                FormatTableCell(iface.Name, selected),
+                FormatStateCell(iface.OperState, selected),
+                FormatTableCell(iface.HardwareName, selected),
+                FormatTableCell(iface.Carrier, selected),
+                FormatTableCell(iface.IPv4Address, selected),
+                FormatTableCell(iface.Speed, selected),
+                FormatTableCell(iface.Manager, selected));
+        }
+
+        AnsiConsole.Write(table);
+    }
+
+    private static string FormatTableCell(string value, bool selected)
+    {
+        var escaped = Markup.Escape(value);
+        return selected ? $"[black on white]{escaped}[/]" : escaped;
+    }
+
+    private static string FormatStateCell(string value, bool selected)
+    {
+        var escaped = Markup.Escape(value);
+        return selected ? $"[black on white]{escaped}[/]" : $"[{GetStateStyle(value)}]{escaped}[/]";
+    }
+
+    private static void PrintPlainInterfaceList(IReadOnlyList<InterfaceSummary> interfaces)
+    {
+        Console.WriteLine("Network interfaces");
+        Console.WriteLine();
+
+        if (interfaces.Count == 0)
+        {
+            Console.WriteLine("No network interfaces detected.");
+            return;
+        }
+
+        for (var i = 0; i < interfaces.Count; i++)
+        {
+            var iface = interfaces[i];
+            Console.WriteLine($"{i + 1}. {iface.Name}\tstate={iface.OperState}\thardware={iface.HardwareName}\tcarrier={iface.Carrier}\tipv4={iface.IPv4Address}\tspeed={iface.Speed}\tmanager={iface.Manager}");
+        }
+
+        Console.WriteLine();
+    }
+
+    private static bool TrySelectNumber(string value, int count, out int selectedIndex)
+    {
+        selectedIndex = -1;
+        if (!int.TryParse(value, out var selected) || selected < 1 || selected > count)
+        {
+            return false;
+        }
+
+        selectedIndex = selected - 1;
+        return true;
     }
 
     private void ShowInterface(string name)
     {
         while (true)
         {
-            ClearScreen();
             var detail = networkService.GetInterfaceDetail(name);
             if (detail is null)
             {
-                Console.WriteLine($"Interface not found: {name}");
-                ReadKey("Press any key to return.");
+                WriteMessage($"Interface not found: {name}", "red");
+                WaitForContinue();
                 return;
             }
 
-            PrintDetail(detail);
-            Console.WriteLine();
-            Console.WriteLine("Actions:");
-            Console.WriteLine("1. Refresh");
-            Console.WriteLine("2. Bring interface up");
-            Console.WriteLine("3. Bring interface down");
-            Console.WriteLine("4. Renew DHCP");
-            Console.WriteLine("5. Set DHCP");
-            Console.WriteLine("6. Set static IPv4");
-            Console.WriteLine("7. Back");
-            Console.WriteLine("8. Quit");
-            Console.Write("Select action: ");
-
-            switch (Console.ReadLine()?.Trim())
+            if (Console.IsInputRedirected || Console.IsOutputRedirected)
             {
-                case "1":
-                    continue;
-                case "2":
-                    ApplyChangingAction("Bring interface up", CommandPlan.Single("ip", "link", "set", "dev", name, "up"));
-                    break;
-                case "3":
-                    ApplyChangingAction("Bring interface down", CommandPlan.Single("ip", "link", "set", "dev", name, "down"));
-                    break;
-                case "4":
-                    ApplyChangingAction("Renew DHCP", new CommandPlan([
-                        new BackendCommand("dhclient", ["-r", name]),
-                        new BackendCommand("dhclient", [name])
-                    ]));
-                    break;
-                case "5":
-                    ApplyChangingAction("Set DHCP", CommandPlan.Single("dhclient", name));
-                    break;
-                case "6":
-                    var plan = PromptStaticIPv4Plan(name);
-                    if (plan is not null)
-                    {
-                        ApplyChangingAction("Set static IPv4", plan);
-                    }
-                    break;
-                case "7":
+                PrintPlainDetail(detail);
+                Console.Write("Select action: ");
+                var actionInput = Console.ReadLine()?.Trim();
+                if (actionInput is null || !TrySelectNumber(actionInput, ActionItems.Length, out var selectedAction))
+                {
                     return;
-                case "8":
-                    Environment.Exit(0);
+                }
+
+                if (RunSelectedAction(selectedAction, name))
+                {
                     return;
+                }
+
+                continue;
+            }
+
+            AnsiConsole.Clear();
+            RenderInterfaceDetail(detail);
+            var action = AnsiConsole.Prompt(
+                new SelectionPrompt<ActionMenuItem>()
+                    .Title("Select an action")
+                    .UseConverter(item => item.Label)
+                    .AddChoices(ActionMenuItem.All));
+
+            if (RunSelectedAction(action.Index, name))
+            {
+                return;
             }
         }
     }
 
-    private static void PrintDetail(InterfaceDetail detail)
+    private static void RenderInterfaceDetail(InterfaceDetail detail)
+    {
+        AnsiConsole.Write(new Rule($"[bold]{Markup.Escape(detail.Name)}[/]").RuleStyle("grey"));
+        AnsiConsole.Write(RenderFieldTable("Addresses", [
+            ("MAC", detail.MacAddress),
+            ("MTU", detail.Mtu),
+            ("IPv4", FormatList(detail.IPv4Addresses)),
+            ("IPv6", FormatList(detail.IPv6Addresses)),
+            ("Default route", detail.DefaultRoute)
+        ]));
+        AnsiConsole.Write(RenderFieldTable("Link", [
+            ("State", detail.OperState),
+            ("Driver", detail.Driver),
+            ("Firmware", detail.Firmware),
+            ("Bus info", detail.BusInfo),
+            ("Speed", detail.Speed),
+            ("Duplex", detail.Duplex),
+            ("Autonegotiation", detail.Autonegotiation),
+            ("Manager", detail.Manager)
+        ]));
+    }
+
+    private static Table RenderFieldTable(string title, IReadOnlyList<(string Label, string Value)> fields)
+    {
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .Title(Markup.Escape(title))
+            .Expand()
+            .AddColumn("Field")
+            .AddColumn("Value");
+
+        foreach (var field in fields)
+        {
+            var value = field.Label == "State"
+                ? $"[{GetStateStyle(field.Value)}]{Markup.Escape(field.Value)}[/]"
+                : Markup.Escape(field.Value);
+            table.AddRow(Markup.Escape(field.Label), value);
+        }
+
+        return table;
+    }
+
+    private static void PrintPlainDetail(InterfaceDetail detail)
     {
         Console.WriteLine(detail.Name);
         Console.WriteLine($"MAC address: {detail.MacAddress}");
@@ -205,21 +365,63 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
         Console.WriteLine($"Duplex: {detail.Duplex}");
         Console.WriteLine($"Autonegotiation: {detail.Autonegotiation}");
         Console.WriteLine($"Manager: {detail.Manager}");
+        Console.WriteLine();
+
+        for (var i = 0; i < ActionItems.Length; i++)
+        {
+            Console.WriteLine($"{i + 1}. {ActionItems[i]}");
+        }
+    }
+
+    private bool RunSelectedAction(int selectedAction, string name)
+    {
+        switch (selectedAction)
+        {
+            case 0:
+                return false;
+            case 1:
+                ApplyChangingAction("Bring interface up", CommandPlan.Single("ip", "link", "set", "dev", name, "up"));
+                return false;
+            case 2:
+                ApplyChangingAction("Bring interface down", CommandPlan.Single("ip", "link", "set", "dev", name, "down"));
+                return false;
+            case 3:
+                ApplyChangingAction("Renew DHCP", new CommandPlan([
+                    new BackendCommand("dhclient", ["-r", name]),
+                    new BackendCommand("dhclient", [name])
+                ]));
+                return false;
+            case 4:
+                ApplyChangingAction("Set DHCP", CommandPlan.Single("dhclient", name));
+                return false;
+            case 5:
+                var plan = PromptStaticIPv4Plan(name);
+                if (plan is not null)
+                {
+                    ApplyChangingAction("Set static IPv4", plan);
+                }
+
+                return false;
+            case 6:
+                return true;
+            case 7:
+                Environment.Exit(0);
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static CommandPlan? PromptStaticIPv4Plan(string name)
     {
-        Console.Write("IP/CIDR (example 192.168.1.50/24): ");
-        var ipCidr = Console.ReadLine()?.Trim();
-        Console.Write("Gateway: ");
-        var gateway = Console.ReadLine()?.Trim();
-        Console.Write("DNS servers (space-separated): ");
-        var dnsServers = Console.ReadLine()?.Trim();
+        var ipCidr = Prompt("IP/CIDR (example 192.168.1.50/24): ").Trim();
+        var gateway = Prompt("Gateway: ").Trim();
+        var dnsServers = Prompt("DNS servers (space-separated): ").Trim();
 
         if (string.IsNullOrWhiteSpace(ipCidr) || string.IsNullOrWhiteSpace(gateway))
         {
-            Console.WriteLine("IP/CIDR and gateway are required.");
-            ReadKey("Press any key to continue.");
+            WriteMessage("IP/CIDR and gateway are required.", "red");
+            WaitForContinue();
             return null;
         }
 
@@ -241,31 +443,30 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
 
     private void ApplyChangingAction(string title, CommandPlan plan)
     {
-        Console.WriteLine();
-        Console.WriteLine(title);
+        WriteMessage(title, "yellow");
         Console.WriteLine("Backend command(s):");
         foreach (var command in plan.Commands)
         {
             Console.WriteLine($"  {command.DisplayText}");
         }
 
-        Console.Write("Apply this change? Type yes to continue: ");
-        if (!string.Equals(Console.ReadLine()?.Trim(), "yes", StringComparison.Ordinal))
+        if (!string.Equals(Prompt("Apply this change? Type yes to continue: ").Trim(), "yes", StringComparison.Ordinal))
         {
-            Console.WriteLine("No changes made.");
-            ReadKey("Press any key to continue.");
+            WriteMessage("No changes made.", "yellow");
+            WaitForContinue();
             return;
         }
 
         if (!CommandRunner.IsRoot())
         {
-            Console.WriteLine("Not running as root. No changes made.");
+            WriteMessage("Not running as root. No changes made.", "yellow");
             Console.WriteLine("Run equivalent command(s):");
             foreach (var command in plan.Commands)
             {
                 Console.WriteLine($"  sudo {command.DisplayText}");
             }
-            ReadKey("Press any key to continue.");
+
+            WaitForContinue();
             return;
         }
 
@@ -279,13 +480,14 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
                 {
                     Console.WriteLine(result.Error.Trim());
                 }
-                ReadKey("Press any key to continue.");
+
+                WaitForContinue();
                 return;
             }
         }
 
-        Console.WriteLine("Change applied.");
-        ReadKey("Press any key to continue.");
+        WriteMessage("Change applied.", "green");
+        WaitForContinue();
     }
 
     private static IReadOnlyList<string> SplitWords(string? value) => string.IsNullOrWhiteSpace(value)
@@ -294,26 +496,63 @@ internal sealed class ConsoleUi(NetworkService networkService, CommandRunner com
 
     private static string FormatList(IReadOnlyList<string> values) => values.Count == 0 ? "unknown" : string.Join(", ", values);
 
-    private static void ReadKey(string message)
+    private static string Prompt(string prompt)
     {
-        Console.WriteLine(message);
-        Console.ReadKey(intercept: true);
+        if (Console.IsInputRedirected || Console.IsOutputRedirected)
+        {
+            Console.Write(prompt);
+            return Console.ReadLine() ?? string.Empty;
+        }
+
+        return AnsiConsole.Prompt(new TextPrompt<string>(Markup.Escape(prompt)).AllowEmpty());
     }
 
-    private static void ClearScreen()
+    private static void WaitForContinue()
     {
-        if (Console.IsOutputRedirected)
+        if (Console.IsInputRedirected || Console.IsOutputRedirected)
         {
+            Console.WriteLine("Press Enter to continue.");
+            Console.ReadLine();
             return;
         }
 
-        try
+        AnsiConsole.Prompt(new TextPrompt<string>("Press [bold]Enter[/] to continue.").AllowEmpty());
+    }
+
+    private static void WriteMessage(string message, string style)
+    {
+        if (Console.IsOutputRedirected)
         {
-            Console.Clear();
+            Console.WriteLine(message);
+            return;
         }
-        catch (IOException)
-        {
-        }
+
+        AnsiConsole.MarkupLine($"[{style}]{Markup.Escape(message)}[/]");
+    }
+
+    private static string GetStateStyle(string state) => state switch
+    {
+        "Up" => "green",
+        "Down" => "red",
+        _ => "yellow"
+    };
+
+    private static readonly string[] ActionItems = [
+        "Refresh",
+        "Bring interface up",
+        "Bring interface down",
+        "Renew DHCP",
+        "Set DHCP",
+        "Set static IPv4",
+        "Back",
+        "Quit"
+    ];
+
+    private sealed record ActionMenuItem(int Index, string Label)
+    {
+        public static IReadOnlyList<ActionMenuItem> All { get; } = ActionItems
+            .Select((label, index) => new ActionMenuItem(index, label))
+            .ToList();
     }
 }
 
@@ -330,9 +569,11 @@ internal sealed class NetworkService
                 var name = interfaceInfo.Name;
                 return new InterfaceSummary(
                     name,
-                    ReadSysClassNet(name, "operstate"),
+                    NormalizeOperState(ReadSysClassNet(name, "operstate")),
+                    string.IsNullOrWhiteSpace(interfaceInfo.Description) ? "unknown" : interfaceInfo.Description,
                     ReadCarrier(name),
-                    GetIPv4Addresses(interfaceInfo).FirstOrDefault() ?? "none",
+                    GetIPv4Addresses(name, interfaceInfo).FirstOrDefault() ?? "none",
+                    GetIPAddresses(interfaceInfo, AddressFamily.InterNetworkV6).FirstOrDefault() ?? "none",
                     ReadSpeed(name),
                     DetectManager(name));
             })
@@ -354,21 +595,29 @@ internal sealed class NetworkService
 
         return new InterfaceDetail(
             name,
+            NormalizeOperState(ReadSysClassNet(name, "operstate")),
             FormatMac(interfaceInfo.GetPhysicalAddress()),
             ReadSysClassNet(name, "mtu"),
-            GetIPAddresses(interfaceInfo, AddressFamily.InterNetwork),
+            GetIPv4Addresses(name, interfaceInfo),
             GetIPAddresses(interfaceInfo, AddressFamily.InterNetworkV6),
             GetDefaultRoute(name),
             GetValue(driverInfo, "driver"),
             GetValue(driverInfo, "firmware-version"),
             GetValue(driverInfo, "bus-info"),
-            GetValue(linkInfo, "Speed", ReadSpeed(name)),
+            FormatSpeed(GetValue(linkInfo, "Speed", ReadSpeed(name))),
             GetValue(linkInfo, "Duplex"),
             GetValue(linkInfo, "Auto-negotiation"),
             DetectManager(name));
     }
 
-    private static IReadOnlyList<string> GetIPv4Addresses(NetworkInterface interfaceInfo) => GetIPAddresses(interfaceInfo, AddressFamily.InterNetwork);
+    private IReadOnlyList<string> GetIPv4Addresses(string name, NetworkInterface interfaceInfo)
+    {
+        var source = DetectIPv4Source(name, interfaceInfo);
+        return interfaceInfo.GetIPProperties().UnicastAddresses
+            .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork)
+            .Select(address => FormatIPWithSource(address, source))
+            .ToList();
+    }
 
     private static IReadOnlyList<string> GetIPAddresses(NetworkInterface interfaceInfo, AddressFamily addressFamily)
     {
@@ -394,10 +643,90 @@ internal sealed class NetworkService
         };
     }
 
+    private static string NormalizeOperState(string value)
+    {
+        return value switch
+        {
+            "up" => "Up",
+            "down" => "Down",
+            "unknown" => "Unknown",
+            _ => "Unknown"
+        };
+    }
+
     private static string ReadSpeed(string name)
     {
         var speed = ReadSysClassNet(name, "speed");
-        return int.TryParse(speed, out _) ? $"{speed} Mb/s" : speed;
+        return FormatSpeed(speed);
+    }
+
+    private static string FormatSpeed(string value)
+    {
+        var normalized = value.Trim();
+        var digits = new string(normalized.TakeWhile(char.IsDigit).ToArray());
+        if (!int.TryParse(digits, out var megabits))
+        {
+            return normalized;
+        }
+
+        if (megabits > 100)
+        {
+            var gigabits = megabits / 1000m;
+            return $"{gigabits.ToString("0.##", CultureInfo.InvariantCulture)} Gb/s";
+        }
+
+        return $"{megabits} Mb/s";
+    }
+
+    private string DetectIPv4Source(string name, NetworkInterface interfaceInfo)
+    {
+        var addresses = interfaceInfo.GetIPProperties().UnicastAddresses
+            .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork)
+            .Select(address => address.Address)
+            .ToList();
+
+        if (addresses.Count == 0)
+        {
+            return "Static";
+        }
+
+        if (addresses.Any(IsApipa))
+        {
+            return "APIPA";
+        }
+
+        return HasActiveDhcpLease(name) ? "DHCP" : "Static";
+    }
+
+    private static string FormatIPWithSource(UnicastIPAddressInformation address, string source)
+    {
+        var display = address.PrefixLength > 0 ? $"{address.Address}/{address.PrefixLength}" : address.Address.ToString();
+        var actualSource = IsApipa(address.Address) ? "APIPA" : source;
+        return $"{display} ({actualSource})";
+    }
+
+    private bool HasActiveDhcpLease(string name)
+    {
+        var ifIndex = ReadSysClassNet(name, "ifindex");
+        if (ifIndex != "unknown" && File.Exists(Path.Combine("/run/systemd/netif/leases", ifIndex)))
+        {
+            return true;
+        }
+
+        var nmcli = commandRunner.Run("nmcli", ["-g", "IP4.METHOD", "device", "show", name]);
+        if (nmcli.ExitCode == 0 && nmcli.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Any(line => string.Equals(line, "auto", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsApipa(IPAddress address)
+    {
+        var bytes = address.GetAddressBytes();
+        return bytes.Length >= 2 && bytes[0] == 169 && bytes[1] == 254;
     }
 
     private static string ReadSysClassNet(string name, string fileName)
@@ -524,10 +853,11 @@ internal static class ProcessStartInfoExtensions
     }
 }
 
-internal sealed record InterfaceSummary(string Name, string OperState, string Carrier, string IPv4Address, string Speed, string Manager);
+internal sealed record InterfaceSummary(string Name, string OperState, string HardwareName, string Carrier, string IPv4Address, string IPv6Address, string Speed, string Manager);
 
 internal sealed record InterfaceDetail(
     string Name,
+    string OperState,
     string MacAddress,
     string Mtu,
     IReadOnlyList<string> IPv4Addresses,
